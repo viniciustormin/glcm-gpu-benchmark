@@ -77,13 +77,13 @@ echo ""
 echo "── Compilando kernels CUDA (sm_90) ─────────────────────────"
 
 echo -n "  glcm_cuda.so  ... "
-container_exec nvcc -O3 -arch=sm_90 -shared -fPIC \
+container_exec nvcc -O3 -arch=sm_90 -shared -Xcompiler -fPIC \
     -o "${PROJECT_ROOT}/glcm_cuda.so" \
        "${PROJECT_ROOT}/glcm_cuda.cu"
 echo "OK"
 
 echo -n "  glcm_shared.so ... "
-container_exec nvcc -O3 -arch=sm_90 -shared -fPIC \
+container_exec nvcc -O3 -arch=sm_90 -shared -Xcompiler -fPIC \
     -o "${PROJECT_ROOT}/glcm_shared.so" \
        "${PROJECT_ROOT}/glcm_shared.cu"
 echo "OK"
