@@ -1,0 +1,29 @@
+# Dados gerados em runtime
+data/
+logs/
+
+# Bibliotecas compiladas
+*.so
+*.o
+*.a
+
+# Resultados do benchmark
+benchmark_results.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
