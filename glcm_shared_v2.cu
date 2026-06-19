@@ -1,16 +1,15 @@
 /*
- * glcm_shared.cu — Kernel CUDA otimizado com shared memory para GLCM em lote
+ * glcm_shared_v2.cu — Shared Memory com merge CONDICIONAL (pula zeros)
  *
- * Melhoria sobre glcm_cuda.cu: cada bloco acumula sua contribuição numa GLCM
- * privada em shared memory (atomicAdd na SHMEM é ~10-30x mais rápido que na
- * memória global). Ao final, o bloco faz um merge atômico para a GLCM global.
+ * Fix do problema identificado nos resultados preliminares:
+ *   Merge incondicional percorria todas as 4096 entradas da GLCM,
+ *   incluindo zeros, gerando ~921K atomicAdds extras no 512².
  *
- * Análise de memória por bloco:
- *   GLCM_SIZE = 64 × 64 = 4096 entradas × 4 bytes = 16 KB
- *   Limite H100 (sm_89): 228 KB por bloco → seguro.
+ * Solução: na Fase 3, verificar s_glcm[i] > 0 antes do atomicAdd global.
+ *   Reduz atomicAdds globais em ~60-80% dependendo da esparsidade da GLCM.
  *
- * Compile:
- *   nvcc -O3 -arch=sm_89 -shared -fPIC -o glcm_shared.so glcm_shared.cu
+ * Compile (RTX 4090 / sm_89):
+ *   nvcc -O3 -arch=sm_89 -shared -Xcompiler -fPIC -o glcm_shared_v2.so glcm_shared_v2.cu
  */
 
 #include <cuda_runtime.h>
@@ -32,20 +31,15 @@ static void cuda_check(cudaError_t err, const char* file, int line) {
 #define CUDA_CHECK(x) cuda_check((x), __FILE__, __LINE__)
 
 /* -----------------------------------------------------------------------
- * Kernel: um bloco por patch.
- *
- * Fase 1 — zerar GLCM local na shared memory.
- * Fase 2 — cada thread itera sobre seus pixels e acumula em s_glcm (rápido).
- * Fase 3 — merge s_glcm → g_glcm com atomicAdd (um acesso global por entrada,
- *           em vez de um por pixel-par).
+ * Kernel v2: merge CONDICIONAL — só escreve entradas não-zero.
  * --------------------------------------------------------------------- */
-__global__ void glcm_shared_kernel(
-    const uint8_t* __restrict__ patches,   /* [n_patches, pH, pW] */
+__global__ void glcm_shared_v2_kernel(
+    const uint8_t* __restrict__ patches,
     int n_patches, int pH, int pW,
-    int* glcms,                            /* [n_patches, 4, N_LEVELS, N_LEVELS] */
+    int* glcms,
     int angle_idx
 ) {
-    __shared__ int s_glcm[GLCM_SIZE];     /* 16 KB por bloco */
+    __shared__ int s_glcm[GLCM_SIZE];   /* 16 KB */
 
     const int dx[4] = { 1,  1, 0, -1 };
     const int dy[4] = { 0,  1, 1,  1 };
@@ -53,12 +47,12 @@ __global__ void glcm_shared_kernel(
     int p   = blockIdx.x;
     int tid = threadIdx.x;
 
-    /* ── Fase 1: zerar GLCM local ─────────────────────────────────────── */
+    /* Fase 1: zerar GLCM local */
     for (int i = tid; i < GLCM_SIZE; i += BLOCK_DIM)
         s_glcm[i] = 0;
     __syncthreads();
 
-    /* ── Fase 2: acumular em shared memory ────────────────────────────── */
+    /* Fase 2: acumular em shared memory */
     if (p < n_patches) {
         const uint8_t* patch = patches + (size_t)p * pH * pW;
         int n_pixels = pH * pW;
@@ -66,10 +60,8 @@ __global__ void glcm_shared_kernel(
         for (int idx = tid; idx < n_pixels; idx += BLOCK_DIM) {
             int y = idx / pW;
             int x = idx % pW;
-
             int nx = x + dx[angle_idx];
             int ny = y + dy[angle_idx];
-
             if (nx >= 0 && nx < pW && ny >= 0 && ny < pH) {
                 int v1 = patch[y * pW + x];
                 int v2 = patch[ny * pW + nx];
@@ -80,19 +72,19 @@ __global__ void glcm_shared_kernel(
     }
     __syncthreads();
 
-    /* ── Fase 3: merge shared → global ───────────────────────────────── */
+    /* Fase 3: merge CONDICIONAL — pula entradas zero */
     if (p < n_patches) {
         int* g_glcm = glcms + ((size_t)(p * 4 + angle_idx)) * GLCM_SIZE;
-        for (int i = tid; i < GLCM_SIZE; i += BLOCK_DIM)
-            atomicAdd(&g_glcm[i], s_glcm[i]);
+        for (int i = tid; i < GLCM_SIZE; i += BLOCK_DIM) {
+            int val = s_glcm[i];
+            if (val > 0)   /* ← fix principal */
+                atomicAdd(&g_glcm[i], val);
+        }
     }
 }
 
-/* -----------------------------------------------------------------------
- * Interface C idêntica à do glcm_cuda.cu — substituição direta.
- * --------------------------------------------------------------------- */
 extern "C" {
-void compute_glcm_shared(
+void compute_glcm_shared_v2(
     const uint8_t* h_patches,
     int n_patches, int pH, int pW,
     float* h_glcm_out
@@ -113,7 +105,7 @@ void compute_glcm_shared(
     dim3 block(BLOCK_DIM);
 
     for (int a = 0; a < 4; a++) {
-        glcm_shared_kernel<<<grid, block>>>(
+        glcm_shared_v2_kernel<<<grid, block>>>(
             d_patches, n_patches, pH, pW, d_glcms, a);
     }
     CUDA_CHECK(cudaDeviceSynchronize());

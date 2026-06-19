@@ -1,13 +1,15 @@
 """
-Benchmark: CPU Sequential vs CUDA Basic vs CUDA + Shared Memory.
+Benchmark final: CPU Sequential vs CUDA Basic vs CUDA Shared Memory
+vs CUDA Shared v2 (merge condicional) vs CUDA Dynamic Parallelism
+vs CUDA Basic + cuML KMeans.
+
 Resoluções: 256x256, 512x512, 1024x1024.
 3 repetições por combinação → usa a mediana.
-Salva benchmark_results.json no formato exato exigido.
+Salva benchmark_results.json.
 """
 
 import json
 import os
-import statistics
 import subprocess
 import sys
 import time
@@ -16,39 +18,36 @@ from pathlib import Path
 import numpy as np
 
 from glcm_cpu import run_cpu_pipeline
-from glcm_gpu import run_gpu_pipeline
-
-# ── Configuração ──────────────────────────────────────────────────────────────
+from glcm_gpu import run_gpu_pipeline, run_gpu_pipeline_cuml
 
 RESOLUTIONS = [256, 512, 1024]
 N_REPS = 3
 DATA_DIR = Path("./data")
-SO_BASIC  = "./glcm_cuda.so"
-SO_SHARED = "./glcm_shared.so"
 
+# (nome, tipo, so_path, func_name, usa_cuml)
 APPROACHES = [
-    ("CPU Sequential",      "cpu",    None,       None),
-    ("CUDA Basic",          "gpu",    SO_BASIC,   "compute_glcm_basic"),
-    ("CUDA Shared Memory",  "gpu",    SO_SHARED,  "compute_glcm_shared"),
+    ("CPU Sequential",          "cpu",    None,                    None,                       False),
+    ("CUDA Basic",              "gpu",    "./glcm_cuda.so",        "compute_glcm_basic",        False),
+    ("CUDA Shared Memory",      "gpu",    "./glcm_shared.so",      "compute_glcm_shared",       False),
+    ("CUDA Shared v2 (fix)",    "gpu",    "./glcm_shared_v2.so",   "compute_glcm_shared_v2",    False),
+    ("CUDA Dyn. Parallelism",   "gpu",    "./glcm_dynpar.so",      "compute_glcm_dynpar",       False),
+    ("CUDA Basic + cuML",       "gpu",    "./glcm_cuda.so",        "compute_glcm_basic",        True),
 ]
 
 
-# ── Utilitários ───────────────────────────────────────────────────────────────
-
 def get_gpu_name() -> str:
     try:
-        out = subprocess.check_output(
+        return subprocess.check_output(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
             text=True, stderr=subprocess.DEVNULL
         ).strip().splitlines()[0]
-        return out
     except Exception:
         return "unknown"
 
 
 def check_cuml() -> bool:
     try:
-        import cuml  # noqa: F401
+        import cuml  # noqa
         return True
     except ImportError:
         return False
@@ -59,38 +58,45 @@ def image_path(size: int) -> str:
 
 
 def median_run(fn, n_reps: int) -> dict:
-    """Executa fn() n_reps vezes e retorna o resultado com tempo mediano."""
     results = [fn() for _ in range(n_reps)]
-    # Ordena pelo tempo total e pega o mediano
     results.sort(key=lambda r: r["total_time_s"])
     return results[n_reps // 2]
 
 
-def warmup_gpu(so_path: str, func_name: str):
-    """Aquece a GPU com uma chamada descartada na menor imagem."""
+def warmup_gpu(so_path: str, func_name: str, use_cuml: bool):
     path = image_path(256)
-    if Path(path).exists():
+    if Path(path).exists() and Path(so_path).exists():
         try:
-            run_gpu_pipeline(path, so_path, func_name)
+            if use_cuml:
+                run_gpu_pipeline_cuml(path, so_path, func_name)
+            else:
+                run_gpu_pipeline(path, so_path, func_name)
         except Exception:
             pass
 
 
-# ── Benchmark principal ───────────────────────────────────────────────────────
-
 def main():
-    print("=" * 70)
-    print("GLCM Benchmark — CPU vs CUDA Basic vs CUDA Shared Memory")
-    print("=" * 70)
+    print("=" * 75)
+    print("GLCM Benchmark — CPU vs CUDA Basic vs Shared vs Shared v2 vs DynPar vs cuML")
+    print("=" * 75)
 
-    gpu_name = get_gpu_name()
-    cuml_available = check_cuml()
+    gpu_name    = get_gpu_name()
+    cuml_avail  = check_cuml()
+    # Detectar arch da GPU
+    try:
+        arch_out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+            text=True, stderr=subprocess.DEVNULL
+        ).strip().splitlines()[0].replace(".", "")
+        cuda_arch = f"sm_{arch_out}"
+    except Exception:
+        cuda_arch = "sm_89"
+
     print(f"GPU            : {gpu_name}")
-    print(f"CUDA arch      : sm_90")
-    print(f"cuML available : {cuml_available}")
+    print(f"CUDA arch      : {cuda_arch}")
+    print(f"cuML available : {cuml_avail}")
     print()
 
-    # Verificar que os dados existem
     for size in RESOLUTIONS:
         p = image_path(size)
         if not Path(p).exists():
@@ -98,40 +104,44 @@ def main():
             print("Execute primeiro: python glcm_data.py")
             sys.exit(1)
 
-    # Verificar que os .so existem
-    for _, kind, so, _ in APPROACHES:
-        if kind == "gpu" and not Path(so).exists():
-            print(f"[ERROR] Biblioteca não encontrada: {so}")
-            print("Compile os kernels CUDA antes de rodar o benchmark.")
-            sys.exit(1)
+    # Verificar .so
+    for name, kind, so, func, use_cuml in APPROACHES:
+        if kind == "gpu" and so and not Path(so).exists():
+            print(f"[AVISO] .so não encontrado, pulando: {so}  ({name})")
 
-    # Warmup GPU
+    # Warmup
     print("Aquecendo GPU...")
-    for _, kind, so, func in APPROACHES:
-        if kind == "gpu":
-            warmup_gpu(so, func)
+    for _, kind, so, func, use_cuml in APPROACHES:
+        if kind == "gpu" and so and Path(so).exists():
+            warmup_gpu(so, func, use_cuml)
     print("Warmup concluído.\n")
 
-    # Referência CPU por resolução (para calcular speedup)
     cpu_ref: dict[int, float] = {}
-
     runs = []
 
     for size in RESOLUTIONS:
         path = image_path(size)
         res_label = f"{size}x{size}"
-        print(f"── Resolução {res_label} ──────────────────────────────")
+        print(f"── Resolução {res_label} ─────────────────────────────────────")
 
-        for approach_name, kind, so, func in APPROACHES:
+        for approach_name, kind, so, func, use_cuml in APPROACHES:
+            # Pular se .so ausente
+            if kind == "gpu" and so and not Path(so).exists():
+                print(f"  {approach_name:<30} [PULADO — .so ausente]")
+                continue
+            if use_cuml and not cuml_avail:
+                print(f"  {approach_name:<30} [PULADO — cuML não disponível]")
+                continue
+
             if kind == "cpu":
                 fn = lambda p=path: run_cpu_pipeline(p)
+            elif use_cuml:
+                fn = lambda p=path, s=so, f=func: run_gpu_pipeline_cuml(p, s, f)
             else:
                 fn = lambda p=path, s=so, f=func: run_gpu_pipeline(p, s, f)
 
-            print(f"  {approach_name:<28} ", end="", flush=True)
-            t_wall = time.perf_counter()
+            print(f"  {approach_name:<30} ", end="", flush=True)
             result = median_run(fn, N_REPS)
-            t_wall = time.perf_counter() - t_wall
 
             if kind == "cpu":
                 cpu_ref[size] = result["total_time_s"]
@@ -161,8 +171,8 @@ def main():
 
     output = {
         "gpu": gpu_name,
-        "cuda_arch": "sm_90",
-        "cuml_available": cuml_available,
+        "cuda_arch": cuda_arch,
+        "cuml_available": cuml_avail,
         "runs": runs,
     }
 
@@ -170,17 +180,15 @@ def main():
     with open(out_path, "w") as f:
         json.dump(output, f, indent=2)
 
-    print(f"Resultados salvos em: {out_path}")
-    print()
+    print(f"Resultados salvos em: {out_path}\n")
 
-    # Tabela final resumida
-    print(f"{'Approach':<28} {'Resolution':<12} {'Total(s)':<10} {'Speedup':<10} {'Silhouette'}")
-    print("-" * 75)
+    print(f"{'Approach':<30} {'Resolution':<12} {'Total(s)':<10} {'GLCM(s)':<10} {'Speedup':<10} Silhouette")
+    print("-" * 80)
     for r in runs:
         print(
-            f"{r['approach']:<28} {r['resolution']:<12} "
-            f"{r['total_time_s']:<10.3f} {r['speedup']:<10.2f}x "
-            f"{r['silhouette_score']:.3f}"
+            f"{r['approach']:<30} {r['resolution']:<12} "
+            f"{r['total_time_s']:<10.3f} {r['glcm_time_s']:<10.3f} "
+            f"{r['speedup']:<10.2f}x {r['silhouette_score']:.3f}"
         )
 
 

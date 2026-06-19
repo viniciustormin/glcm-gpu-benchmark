@@ -1,131 +1,114 @@
 """
-Wrapper ctypes para os kernels CUDA de GLCM + extração de features Haralick em numpy.
-
-Expõe:
-  compute_glcm_gpu(patches_uint8, so_path, func_name)
-      → np.ndarray [n_patches, 4, N_LEVELS, N_LEVELS]  float32
-
-  glcm_to_haralick_batch(glcm_batch)
-      → np.ndarray [n_patches, 20]   (5 props × 4 ângulos)
-      Mesmas propriedades que skimage.feature.graycoprops:
-        contrast, dissimilarity, homogeneity, energy, correlation
-
-  run_gpu_pipeline(image_path, so_path, func_name) → dict com timings
+glcm_gpu.py — Interface Python/ctypes para os kernels CUDA de GLCM.
+Compatível com: glcm_cuda.so, glcm_shared.so, glcm_shared_v2.so, glcm_dynpar.so
 """
 
 import ctypes
 import time
-from pathlib import Path
-
 import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
 
-from glcm_cpu import N_LEVELS, PATCH_SIZE, STEP, N_CLUSTERS, quantize, extract_patches
-
-# ── Haralick grids (pré-computados, reutilizados para todos os patches) ──────
-_I, _J = np.meshgrid(np.arange(N_LEVELS), np.arange(N_LEVELS), indexing="ij")
-_I = _I.astype(np.float64)
-_J = _J.astype(np.float64)
-_DIFF2 = (_I - _J) ** 2
-_ABSDIFF = np.abs(_I - _J)
-_HOMO_W = 1.0 / (1.0 + _DIFF2)
-_IJ = _I * _J
-_I2 = _I ** 2
-_J2 = _J ** 2
+N_LEVELS = 64
+PATCH_SIZE = 64
+STEP = 32
+DISTANCES = [1]
+ANGLES = [0, np.pi / 4, np.pi / 2, 3 * np.pi / 4]
+N_CLUSTERS = 3
+HARALICK_PROPS = ["contrast", "dissimilarity", "homogeneity", "energy", "correlation"]
 
 
-def glcm_to_haralick_batch(glcm_batch: np.ndarray) -> np.ndarray:
+def quantize(image: np.ndarray) -> np.ndarray:
+    return (image >> 10).astype(np.uint8)
+
+
+def extract_patches(image_q: np.ndarray):
+    H, W = image_q.shape
+    patches = []
+    for y in range(0, H - PATCH_SIZE + 1, STEP):
+        for x in range(0, W - PATCH_SIZE + 1, STEP):
+            patches.append(image_q[y: y + PATCH_SIZE, x: x + PATCH_SIZE])
+    return patches
+
+
+def compute_haralick_from_glcm(glcm_batch: np.ndarray) -> np.ndarray:
     """
-    glcm_batch : [n_patches, 4, N_LEVELS, N_LEVELS]  float32 normalizado
-    Retorna    : [n_patches, 20]  float64
+    Calcula 5 propriedades de Haralick a partir de GLCMs pré-calculadas.
+    glcm_batch: [n_patches, 4, N_LEVELS, N_LEVELS] (float32, normalizada)
+    Retorna: [n_patches, 20]  (5 props × 4 ângulos)
     """
-    G = glcm_batch.astype(np.float64)   # [P, 4, N, N]
+    n_patches, n_angles, L, _ = glcm_batch.shape
+    features = np.zeros((n_patches, n_angles * 5), dtype=np.float64)
 
-    contrast      = np.einsum("paij,ij->pa", G, _DIFF2)
-    dissimilarity = np.einsum("paij,ij->pa", G, _ABSDIFF)
-    homogeneity   = np.einsum("paij,ij->pa", G, _HOMO_W)
-    energy        = np.sqrt(np.einsum("paij,paij->pa", G, G))
+    i_idx = np.arange(L, dtype=np.float64)
+    j_idx = np.arange(L, dtype=np.float64)
+    I, J = np.meshgrid(i_idx, j_idx, indexing='ij')
 
-    mu_i     = np.einsum("paij,ij->pa", G, _I)      # [P, 4]
-    mu_j     = np.einsum("paij,ij->pa", G, _J)
-    var_i    = np.einsum("paij,ij->pa", G, _I2) - mu_i ** 2
-    var_j    = np.einsum("paij,ij->pa", G, _J2) - mu_j ** 2
-    sigma_i  = np.sqrt(np.maximum(var_i, 0.0))
-    sigma_j  = np.sqrt(np.maximum(var_j, 0.0))
-    cross    = np.einsum("paij,ij->pa", G, _IJ)
-    denom    = sigma_i * sigma_j
-    correlation = np.where(denom > 1e-10,
-                           (cross - mu_i * mu_j) / denom,
-                           0.0)
+    for p in range(n_patches):
+        for a in range(n_angles):
+            g = glcm_batch[p, a].astype(np.float64)
+            # Contrast
+            contrast = np.sum((I - J) ** 2 * g)
+            # Dissimilarity
+            dissim = np.sum(np.abs(I - J) * g)
+            # Homogeneity
+            homog = np.sum(g / (1.0 + (I - J) ** 2))
+            # Energy
+            energy = np.sum(g ** 2)
+            # Correlation
+            mu_i = np.sum(I * g)
+            mu_j = np.sum(J * g)
+            sig_i = np.sqrt(np.sum((I - mu_i) ** 2 * g) + 1e-10)
+            sig_j = np.sqrt(np.sum((J - mu_j) ** 2 * g) + 1e-10)
+            corr = np.sum((I - mu_i) * (J - mu_j) * g) / (sig_i * sig_j)
+            offset = a * 5
+            features[p, offset + 0] = contrast
+            features[p, offset + 1] = dissim
+            features[p, offset + 2] = homog
+            features[p, offset + 3] = energy
+            features[p, offset + 4] = corr
 
-    # Empilhar na mesma ordem que glcm_cpu.py: [prop, angle]
-    # → [P, 5, 4] → reshape [P, 20]: [c_a0,c_a1,c_a2,c_a3, d_a0,..., corr_a3]
-    props = np.stack([contrast, dissimilarity, homogeneity, energy, correlation],
-                     axis=1)          # [P, 5, 4]
-    return props.reshape(G.shape[0], -1)   # [P, 20]
+    return features
 
-
-# ── Carregamento da biblioteca .so ───────────────────────────────────────────
-
-def _load_lib(so_path: str, func_name: str):
-    lib = ctypes.CDLL(so_path)
-    func = getattr(lib, func_name)
-    func.restype = None
-    func.argtypes = [
-        ctypes.POINTER(ctypes.c_uint8),   # h_patches
-        ctypes.c_int,                      # n_patches
-        ctypes.c_int,                      # pH
-        ctypes.c_int,                      # pW
-        ctypes.POINTER(ctypes.c_float),   # h_glcm_out
-    ]
-    return func
-
-
-def compute_glcm_gpu(
-    patches_uint8: np.ndarray,
-    so_path: str,
-    func_name: str,
-) -> np.ndarray:
-    """
-    patches_uint8 : [n_patches, pH, pW]  uint8 (valores 0..N_LEVELS-1)
-    Retorna       : [n_patches, 4, N_LEVELS, N_LEVELS]  float32
-    """
-    func = _load_lib(so_path, func_name)
-
-    n, pH, pW = patches_uint8.shape
-    patches_c = np.ascontiguousarray(patches_uint8)
-    glcm_out = np.zeros(n * 4 * N_LEVELS * N_LEVELS, dtype=np.float32)
-
-    func(
-        patches_c.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-        ctypes.c_int(n),
-        ctypes.c_int(pH),
-        ctypes.c_int(pW),
-        glcm_out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-    )
-
-    return glcm_out.reshape(n, 4, N_LEVELS, N_LEVELS)
-
-
-# ── Pipeline GPU completo ────────────────────────────────────────────────────
 
 def run_gpu_pipeline(image_path: str, so_path: str, func_name: str) -> dict:
+    lib = ctypes.CDLL(so_path)
+    fn = getattr(lib, func_name)
+    fn.restype = None
+    fn.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ctypes.POINTER(ctypes.c_float),
+    ]
+
     image = np.load(image_path)
 
     t0 = time.perf_counter()
 
     image_q = quantize(image)
     patches = extract_patches(image_q)
-    patches_arr = np.array(patches, dtype=np.uint8)   # [n, 64, 64]
+    n_patches = len(patches)
+
+    patch_arr = np.stack(patches, axis=0).astype(np.uint8)  # [n, H, W]
+    patch_flat = np.ascontiguousarray(patch_arr)
+    pH, pW = PATCH_SIZE, PATCH_SIZE
+
+    glcm_out = np.zeros((n_patches, 4, N_LEVELS, N_LEVELS), dtype=np.float32)
+    glcm_flat = np.ascontiguousarray(glcm_out)
 
     t1 = time.perf_counter()
 
-    # GLCM no GPU (inclui H2D, kernel, D2H)
-    glcm_batch = compute_glcm_gpu(patches_arr, so_path, func_name)
-    # Features Haralick via numpy (CPU, mas rápido em lote)
-    features = glcm_to_haralick_batch(glcm_batch)
+    fn(
+        patch_flat.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        ctypes.c_int(n_patches),
+        ctypes.c_int(pH),
+        ctypes.c_int(pW),
+        glcm_flat.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+    )
+
+    glcm_out = glcm_flat.reshape(n_patches, 4, N_LEVELS, N_LEVELS)
+    features = compute_haralick_from_glcm(glcm_out)
 
     t2 = time.perf_counter()
 
@@ -142,5 +125,85 @@ def run_gpu_pipeline(image_path: str, so_path: str, func_name: str) -> dict:
         "glcm_time_s": t2 - t1,
         "clustering_time_s": t3 - t2,
         "silhouette_score": sil,
-        "n_patches": len(patches),
+        "n_patches": n_patches,
     }
+
+
+def run_gpu_pipeline_cuml(image_path: str, so_path: str, func_name: str) -> dict:
+    """
+    Variante com cuML KMeans (GPU) em vez do sklearn (CPU).
+    Requer: pip install cuml-cu12
+    """
+    try:
+        from cuml.cluster import KMeans as cuKMeans
+        from cuml.metrics import silhouette_score as cu_sil
+        import cupy as cp
+        USE_CUML = True
+    except ImportError:
+        USE_CUML = False
+
+    if not USE_CUML:
+        return run_gpu_pipeline(image_path, so_path, func_name)
+
+    lib = ctypes.CDLL(so_path)
+    fn = getattr(lib, func_name)
+    fn.restype = None
+    fn.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ctypes.POINTER(ctypes.c_float),
+    ]
+
+    image = np.load(image_path)
+    t0 = time.perf_counter()
+
+    image_q = quantize(image)
+    patches = extract_patches(image_q)
+    n_patches = len(patches)
+    patch_arr = np.ascontiguousarray(np.stack(patches, axis=0).astype(np.uint8))
+    pH, pW = PATCH_SIZE, PATCH_SIZE
+
+    glcm_flat = np.zeros((n_patches, 4, N_LEVELS, N_LEVELS), dtype=np.float32)
+    glcm_flat = np.ascontiguousarray(glcm_flat)
+
+    t1 = time.perf_counter()
+
+    fn(
+        patch_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        ctypes.c_int(n_patches), ctypes.c_int(pH), ctypes.c_int(pW),
+        glcm_flat.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+    )
+
+    glcm_out = glcm_flat.reshape(n_patches, 4, N_LEVELS, N_LEVELS)
+    features = compute_haralick_from_glcm(glcm_out)
+
+    t2 = time.perf_counter()
+
+    # cuML KMeans (GPU)
+    scaler = StandardScaler()
+    features_s = scaler.fit_transform(features).astype(np.float32)
+    features_gpu = cp.asarray(features_s)
+    km = cuKMeans(n_clusters=N_CLUSTERS, random_state=42, max_iter=300)
+    labels_gpu = km.fit_predict(features_gpu)
+    sil = float(cu_sil(features_gpu, labels_gpu))
+
+    t3 = time.perf_counter()
+
+    return {
+        "total_time_s": t3 - t0,
+        "glcm_time_s": t2 - t1,
+        "clustering_time_s": t3 - t2,
+        "silhouette_score": sil,
+        "n_patches": n_patches,
+    }
+
+
+if __name__ == "__main__":
+    import sys
+    path = sys.argv[1] if len(sys.argv) > 1 else "./data/image_512x512.npy"
+    so   = sys.argv[2] if len(sys.argv) > 2 else "./glcm_cuda.so"
+    fn   = sys.argv[3] if len(sys.argv) > 3 else "compute_glcm_basic"
+    r = run_gpu_pipeline(path, so, fn)
+    print(f"GPU pipeline [{fn}] — {path}")
+    for k, v in r.items():
+        print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
