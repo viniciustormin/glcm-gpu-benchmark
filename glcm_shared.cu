@@ -7,10 +7,10 @@
  *
  * Análise de memória por bloco:
  *   GLCM_SIZE = 64 × 64 = 4096 entradas × 4 bytes = 16 KB
- *   Limite H100 (sm_90): 228 KB por bloco → seguro.
+ *   Limite H100 (sm_89): 228 KB por bloco → seguro.
  *
  * Compile:
- *   nvcc -O3 -arch=sm_90 -shared -fPIC -o glcm_shared.so glcm_shared.cu
+ *   nvcc -O3 -arch=sm_89 -shared -fPIC -o glcm_shared.so glcm_shared.cu
  */
 
 #include <cuda_runtime.h>

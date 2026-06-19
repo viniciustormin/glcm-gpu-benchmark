@@ -5,7 +5,7 @@
  * pixels e faz atomicAdd diretamente na GLCM em memória global.
  *
  * Compile:
- *   nvcc -O3 -arch=sm_90 -shared -fPIC -o glcm_cuda.so glcm_cuda.cu
+ *   nvcc -O3 -arch=sm_89 -shared -fPIC -o glcm_cuda.so glcm_cuda.cu
  */
 
 #include <cuda_runtime.h>

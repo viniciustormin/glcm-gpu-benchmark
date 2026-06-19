@@ -1,0 +1,169 @@
+{
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "cuda_arch": "sm_89",
+  "cuml_available": true,
+  "runs": [
+    {
+      "approach": "CPU Sequential",
+      "resolution": "256x256",
+      "total_time_s": 0.044705,
+      "glcm_time_s": 0.042687,
+      "clustering_time_s": 0.002,
+      "silhouette_score": 0.562344,
+      "speedup": 1.0
+    },
+    {
+      "approach": "CUDA Basic",
+      "resolution": "256x256",
+      "total_time_s": 0.012528,
+      "glcm_time_s": 0.010418,
+      "clustering_time_s": 0.002043,
+      "silhouette_score": 0.571078,
+      "speedup": 3.5684
+    },
+    {
+      "approach": "CUDA Shared Memory",
+      "resolution": "256x256",
+      "total_time_s": 0.012121,
+      "glcm_time_s": 0.009985,
+      "clustering_time_s": 0.00207,
+      "silhouette_score": 0.571078,
+      "speedup": 3.6882
+    },
+    {
+      "approach": "CUDA Shared v2 (fix)",
+      "resolution": "256x256",
+      "total_time_s": 0.012009,
+      "glcm_time_s": 0.009928,
+      "clustering_time_s": 0.002017,
+      "silhouette_score": 0.571078,
+      "speedup": 3.7226
+    },
+    {
+      "approach": "CUDA Dyn. Parallelism",
+      "resolution": "256x256",
+      "total_time_s": 0.013696,
+      "glcm_time_s": 0.011626,
+      "clustering_time_s": 0.002006,
+      "silhouette_score": 0.571078,
+      "speedup": 3.2641
+    },
+    {
+      "approach": "CUDA Basic + cuML",
+      "resolution": "256x256",
+      "total_time_s": 0.011999,
+      "glcm_time_s": 0.00995,
+      "clustering_time_s": 0.001986,
+      "silhouette_score": 0.571078,
+      "speedup": 3.7256
+    },
+    {
+      "approach": "CPU Sequential",
+      "resolution": "512x512",
+      "total_time_s": 0.179388,
+      "glcm_time_s": 0.17669,
+      "clustering_time_s": 0.002606,
+      "silhouette_score": 0.624235,
+      "speedup": 1.0
+    },
+    {
+      "approach": "CUDA Basic",
+      "resolution": "512x512",
+      "total_time_s": 0.044701,
+      "glcm_time_s": 0.041893,
+      "clustering_time_s": 0.002532,
+      "silhouette_score": 0.627981,
+      "speedup": 4.013
+    },
+    {
+      "approach": "CUDA Shared Memory",
+      "resolution": "512x512",
+      "total_time_s": 0.044494,
+      "glcm_time_s": 0.041739,
+      "clustering_time_s": 0.002504,
+      "silhouette_score": 0.627981,
+      "speedup": 4.0317
+    },
+    {
+      "approach": "CUDA Shared v2 (fix)",
+      "resolution": "512x512",
+      "total_time_s": 0.044562,
+      "glcm_time_s": 0.041813,
+      "clustering_time_s": 0.002508,
+      "silhouette_score": 0.627981,
+      "speedup": 4.0255
+    },
+    {
+      "approach": "CUDA Dyn. Parallelism",
+      "resolution": "512x512",
+      "total_time_s": 0.046517,
+      "glcm_time_s": 0.04372,
+      "clustering_time_s": 0.002545,
+      "silhouette_score": 0.627981,
+      "speedup": 3.8564
+    },
+    {
+      "approach": "CUDA Basic + cuML",
+      "resolution": "512x512",
+      "total_time_s": 0.044597,
+      "glcm_time_s": 0.041792,
+      "clustering_time_s": 0.002561,
+      "silhouette_score": 0.627981,
+      "speedup": 4.0225
+    },
+    {
+      "approach": "CPU Sequential",
+      "resolution": "1024x1024",
+      "total_time_s": 0.827503,
+      "glcm_time_s": 0.803878,
+      "clustering_time_s": 0.02316,
+      "silhouette_score": 0.697559,
+      "speedup": 1.0
+    },
+    {
+      "approach": "CUDA Basic",
+      "resolution": "1024x1024",
+      "total_time_s": 0.24794,
+      "glcm_time_s": 0.224119,
+      "clustering_time_s": 0.02209,
+      "silhouette_score": 0.674903,
+      "speedup": 3.3375
+    },
+    {
+      "approach": "CUDA Shared Memory",
+      "resolution": "1024x1024",
+      "total_time_s": 0.218929,
+      "glcm_time_s": 0.194127,
+      "clustering_time_s": 0.023126,
+      "silhouette_score": 0.674903,
+      "speedup": 3.7798
+    },
+    {
+      "approach": "CUDA Shared v2 (fix)",
+      "resolution": "1024x1024",
+      "total_time_s": 0.217592,
+      "glcm_time_s": 0.193804,
+      "clustering_time_s": 0.022105,
+      "silhouette_score": 0.674903,
+      "speedup": 3.803
+    },
+    {
+      "approach": "CUDA Dyn. Parallelism",
+      "resolution": "1024x1024",
+      "total_time_s": 0.206349,
+      "glcm_time_s": 0.182639,
+      "clustering_time_s": 0.022488,
+      "silhouette_score": 0.535882,
+      "speedup": 4.0102
+    },
+    {
+      "approach": "CUDA Basic + cuML",
+      "resolution": "1024x1024",
+      "total_time_s": 0.204707,
+      "glcm_time_s": 0.1808,
+      "clustering_time_s": 0.022684,
+      "silhouette_score": 0.674903,
+      "speedup": 4.0424
+    }
+  ]
+}
